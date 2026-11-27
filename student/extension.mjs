@@ -651,6 +651,130 @@ export function createStudentView() {
       root.append(proposalSection);
       return root;
     },
-    renderAction() { return '학생 구현 대기: 현재 사건·조치·실제 대상·사람 확인·ACK와 원천 효과·unknown을 구분하세요.'; },
+    renderAction({ status, event, actionId, target, receipt, observation, message, confirmationExpiresAt, error } = {}) {
+      const root = node('section');
+      const labels = {
+        idle: '아직 미실행(idle)',
+        loading: '조치 준비 또는 결과 조회 중(loading)',
+        prepared: '준비됨·미실행(prepared)',
+        executing: '서버에 전달 중(executing)',
+        pending: '서버 접수·처리 중(pending)',
+        succeeded: '효과 확인(succeeded)',
+        denied: '조치 거절(denied)',
+        failed: '조치 실패(failed)',
+        unknown: '결과 불명(unknown)',
+        expired: '확인 기한 만료(expired)',
+        error: '요청 처리 안 됨(error)',
+      };
+      const knownStatus = typeof status === 'string' && Object.hasOwn(labels, status);
+      const validEventId = typeof event?.id === 'string' && event.id.length > 0;
+      const validRequestId = typeof receipt?.requestId === 'string' && receipt.requestId.length > 0;
+      const receiptStatusMismatch = ['prepared', 'pending', 'succeeded', 'denied', 'failed'].includes(status)
+        && receipt?.status != null && receipt.status !== status;
+      const bindingMismatch = ['prepared', 'executing', 'pending', 'succeeded', 'denied', 'failed'].includes(status)
+        && ((receipt?.eventId != null && receipt.eventId !== event?.id)
+        || (receipt?.actionId != null && receipt.actionId !== actionId)
+        || receiptStatusMismatch);
+      const observedAtValid = typeof observation?.observedAt === 'string' && Number.isFinite(Date.parse(observation.observedAt));
+      const receiptIdValid = typeof receipt?.receiptId === 'string' && receipt.receiptId.length > 0;
+      const effectConfirmed = status === 'succeeded' && observation?.effectApplied === true
+        && observedAtValid && receiptIdValid && receipt?.eventId === event?.id
+        && receipt?.actionId === actionId && !bindingMismatch;
+      const resultUnknown = !knownStatus || status === 'unknown' || bindingMismatch
+        || receipt?.superseded === true
+        || (status === 'succeeded' && !effectConfirmed);
+      const visibleStatus = resultUnknown ? 'unknown' : status;
+      const valueText = (value) => typeof value === 'string' && value.length > 0 && value.length <= 500
+        ? value
+        : Number.isSafeInteger(value) ? String(value) : '확인 불가';
+      const appendField = (label, value) => {
+        if (value !== null && value !== undefined) root.append(node('p', `${label}: ${valueText(value)}`));
+      };
+
+      root.append(node('p', labels[visibleStatus] || labels.unknown, `state ${visibleStatus === 'succeeded' ? 'state-ok' : visibleStatus === 'denied' || visibleStatus === 'failed' || visibleStatus === 'error' ? 'state-error' : 'state-empty'}`));
+      if (status !== visibleStatus && typeof status === 'string') {
+        root.append(node('p', `수신 상태: ${status}. 효과 확인 조건을 충족하지 않아 결과 불명으로 표시합니다.`));
+      }
+
+      if (visibleStatus === 'unknown') {
+        const unknownReason = bindingMismatch
+          ? '영수증의 사건·조치 또는 처리 상태가 현재 요청과 일치하지 않습니다.'
+          : receipt?.superseded === true
+            ? '이 영수증은 최신 처리 결과가 아닙니다.'
+          : status === 'succeeded'
+            ? '효과 관측 또는 영수증 정보가 없어 효과 적용 여부를 확인할 수 없습니다.'
+            : '효과가 적용됐는지 또는 적용되지 않았는지 판단할 수 없습니다.';
+        root.append(
+          node('p', unknownReason),
+          node('p', '효과 없음이나 성공으로 단정하지 않습니다. 제공 화면의 “연동 시스템 결과만 재조회”를 사용하세요.'),
+        );
+      } else if (status === 'idle') {
+        root.append(node('p', '조치가 실행된 것으로 확인되지 않았습니다. 화면 취소는 이미 서버에 전달된 조치 효과를 되돌리지 않습니다.'));
+      } else if (visibleStatus === 'loading') {
+        root.append(node('p', '조치 준비 또는 연동 시스템 결과 조회 중입니다. 처리 결과는 아직 확인되지 않았습니다.'));
+      } else if (visibleStatus === 'prepared') {
+        root.append(node('p', '조치 준비만 완료됐으며 서버에 전달되거나 실행되지 않았습니다. 대상과 조치 확인은 제공 화면의 확인 절차를 사용하세요.'));
+      } else if (visibleStatus === 'executing') {
+        root.append(node('p', '요청을 서버에 전달 중입니다. 처리 결과와 효과는 아직 확인되지 않았습니다.'));
+      } else if (visibleStatus === 'pending') {
+        root.append(node('p', '서버가 요청을 접수해 처리 중입니다. 접수 응답(ACK)은 조치 효과 확인이 아닙니다.'));
+      } else if (visibleStatus === 'succeeded' && effectConfirmed) {
+        root.append(
+          node('p', '연동 시스템의 효과를 관측으로 확인했습니다.'),
+          node('p', `관측 시각: ${observation.observedAt}`),
+          node('p', 'effectApplied: true'),
+        );
+      } else if (visibleStatus === 'denied') {
+        root.append(node('p', '연동 시스템이 조치 요청을 거절했습니다. 효과가 적용된 것으로 표시하지 않습니다.'));
+      } else if (visibleStatus === 'failed') {
+        root.append(node('p', '연동 시스템이 조치 요청 실패를 반환했습니다. 효과 적용 여부를 성공으로 표시하지 않습니다.'));
+      } else if (visibleStatus === 'expired') {
+        root.append(node('p', '확인 기한이 지났습니다. 제공 화면에서 조치를 다시 준비해야 합니다.'));
+      } else if (visibleStatus === 'error') {
+        const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+          ? error.code
+          : 'ACTION_RESULT_UNVERIFIED';
+        const safeMessage = typeof error?.message === 'string' && error.message.trim() && error.message.length <= 1000
+          ? error.message
+          : '요청 오류 메시지를 확인할 수 없습니다.';
+        root.append(node('p', `요청이 처리되지 않았습니다. ${code}: ${safeMessage}`));
+      }
+      if (typeof message === 'string' && message.trim() && message.length <= 1000 && status !== 'error') {
+        root.append(node('p', `상태 메시지: ${message}`));
+      }
+
+      if (validEventId) {
+        root.dataset.studentActionEvent = event.id;
+        appendField('사건 ID', event.id);
+      }
+      const evidenceIds = Array.isArray(event?.evidence)
+        ? event.evidence.map((item) => item?.id).filter((id) => typeof id === 'string' && id.length > 0)
+        : [];
+      if (evidenceIds.length) appendField('사건 근거 ID', evidenceIds.join(', '));
+      appendField('조치 ID', actionId);
+      if (target && typeof target === 'object') {
+        appendField('실제 대상 ID', target.id);
+        appendField('대상 generation', target.generation);
+      }
+      if (receipt && typeof receipt === 'object') {
+        if (validRequestId) {
+          root.dataset.studentActionRequest = receipt.requestId;
+          appendField('요청 ID', receipt.requestId);
+        }
+        appendField('영수증 ID', receipt.receiptId);
+        appendField('영수증 version', receipt.version);
+        appendField('영수증 사건 ID', receipt.eventId);
+        appendField('영수증 조치 ID', receipt.actionId);
+        appendField('영수증 상태(receipt.status)', receipt.status);
+        if (typeof receipt.replayed === 'boolean') root.append(node('p', `재전달 여부(replayed): ${receipt.replayed}`));
+        if (receipt.superseded === true) root.append(node('p', '이 영수증은 최신 결과가 아닙니다(superseded).'));
+      }
+      appendField('확인 기한', confirmationExpiresAt);
+      if (observation && typeof observation === 'object' && !effectConfirmed) {
+        appendField('관측 시각', observation.observedAt);
+        if (typeof observation.effectApplied === 'boolean') root.append(node('p', `관측 effectApplied: ${observation.effectApplied}`));
+      }
+      return root;
+    },
   };
 }
