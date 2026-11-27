@@ -426,7 +426,136 @@ export function createStudentView() {
       root.append(helpSection);
       return root;
     },
-    renderVulnerabilities() { return '학생 구현 대기: 정확한 설치 버전·OSV 출처·조회 시각·부분 결과·조회 실패를 구분하세요.'; },
+    renderVulnerabilities({ status, mode, data, error } = {}) {
+      const root = node('section');
+      if (MODE_NOTICE[mode]) root.append(node('p', `${MODE_NOTICE[mode]} (${mode})`, 'tag tag-demo'));
+
+      if (status === 'idle') {
+        root.append(node('p', '취약점 조회 전(idle): 아직 조회 결과가 없습니다.', 'state state-empty'));
+        return root;
+      }
+      if (status === 'loading') {
+        root.append(node('p', '설치 패키지의 취약점 정보를 조회 중입니다(loading).', 'state state-loading'));
+        return root;
+      }
+      if (status === 'error') {
+        const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+          ? error.code
+          : null;
+        const message = typeof error?.message === 'string' && error.message.trim() && error.message.length <= 1000
+          ? error.message
+          : '조회 오류 메시지를 확인할 수 없습니다.';
+        root.append(
+          node('p', `취약점 조회 실패(error)${code ? ` (${code})` : ''}: ${message}`, 'state state-error'),
+          node('p', '조회 실패는 취약점이 없다는 뜻이 아닙니다. 이전 조회 결과는 현재 결과로 표시하지 않습니다.'),
+        );
+        return root;
+      }
+      if (status !== 'ok') {
+        root.append(node('p', '취약점 조회 상태를 확인할 수 없습니다.', 'state state-empty'));
+        return root;
+      }
+
+      const scanLabels = {
+        complete: '모두 조회',
+        partial: '일부 조회 실패',
+        not_checked: '아직 조회 안 함',
+        not_configured: '조회 대상 프로젝트 설정 필요',
+        unverifiable: 'lock 파일 확인 불가',
+      };
+      if (!data || typeof data !== 'object' || Array.isArray(data)
+        || typeof data.status !== 'string' || !Object.hasOwn(scanLabels, data.status)) {
+        root.append(node('p', '조회 결과를 확인할 수 없습니다: 전체 조회 상태 형식이 올바르지 않습니다.', 'state state-empty'));
+        return root;
+      }
+
+      root.append(node('p', `${scanLabels[data.status]}(${data.status})`, data.status === 'complete' ? 'state state-ok' : data.status === 'partial' ? 'state state-error' : 'state state-empty'));
+      if (data.status === 'complete' || data.status === 'partial') {
+        root.append(node('p', 'package-lock.json과 설치된 node_modules 메타데이터를 대조한 정확한 설치 버전 기준 결과입니다.'));
+      } else if (data.status === 'not_checked') {
+        root.append(node('p', '승인된 공개 조회 대상 패키지가 없어 조회하지 않았습니다. 취약점이 없다는 뜻이 아닙니다.'));
+      } else if (data.status === 'not_configured') {
+        root.append(node('p', '조회 대상 프로젝트 설정이 필요합니다. 취약점이 없다는 뜻이 아닙니다.'));
+      } else {
+        root.append(node('p', '잠금 파일을 검증할 수 없어 패키지 취약점 조회를 확인할 수 없습니다.'));
+      }
+
+      if (data.code) root.append(node('p', `조회 코드(code): ${String(data.code)}`));
+      if (data.lockfileVersion !== undefined && data.lockfileVersion !== null) {
+        root.append(node('p', `package-lock.json lockfileVersion: ${String(data.lockfileVersion)}`));
+      }
+      if (typeof data.lockfileHash === 'string') root.append(node('p', `package-lock.json lockfileHash: ${data.lockfileHash}`));
+      if (typeof data.checkedAt === 'string') root.append(node('p', `전체 조회 시각(checkedAt): ${data.checkedAt}`));
+
+      if (!Array.isArray(data.packages)) {
+        root.append(node('p', '패키지 조회 결과를 확인할 수 없습니다: 목록 형식이 올바르지 않습니다.', 'state state-empty'));
+        return root;
+      }
+      const packageLabels = {
+        known_vulnerabilities: '알려진 취약점 있음(known_vulnerabilities)',
+        none_found: '알려진 항목 없음(none_found)',
+        unverifiable: '조회 확인 불가(unverifiable)',
+      };
+      const validPackages = data.packages.every((pkg) => pkg && typeof pkg === 'object'
+        && typeof pkg.name === 'string' && typeof pkg.version === 'string'
+        && Object.hasOwn(packageLabels, pkg.status)
+        && typeof pkg.source === 'string' && typeof pkg.checkedAt === 'string'
+        && Array.isArray(pkg.vulnerabilities)
+        && pkg.vulnerabilities.every((finding) => finding && typeof finding.id === 'string' && typeof finding.modified === 'string'));
+      if (!validPackages) {
+        root.append(node('p', '패키지 조회 결과를 확인할 수 없습니다: 패키지 메타데이터 형식이 올바르지 않습니다.', 'state state-empty'));
+        return root;
+      }
+
+      const table = node('table');
+      const headings = ['패키지', '설치된 정확한 버전', '조회 상태', '출처(source)', '패키지 확인 시각', '취약점 ID·수정 시각'];
+      const headerRow = node('tr');
+      for (const heading of headings) headerRow.append(node('th', heading));
+      const thead = node('thead');
+      thead.append(headerRow);
+      table.append(thead);
+
+      const tbody = node('tbody');
+      for (const pkg of data.packages) {
+        const row = node('tr');
+        row.dataset.studentPackageName = pkg.name;
+        row.dataset.studentPackageVersion = pkg.version;
+        row.append(
+          node('td', pkg.name),
+          node('td', pkg.version),
+          node('td', pkg.status === 'unverifiable' && pkg.vulnerabilities.length > 0
+            ? '일부 확인·전체 조회 확인 불가(unverifiable)'
+            : packageLabels[pkg.status]),
+          node('td', pkg.source),
+          node('td', pkg.checkedAt),
+        );
+
+        const findings = node('td');
+        if (pkg.vulnerabilities.length === 0) {
+          findings.textContent = pkg.status === 'none_found'
+            ? '조회 범위에서 알려진 취약점 항목 없음'
+            : '확인된 취약점 ID 없음';
+        } else {
+          const findingList = node('ul', null, 'plain-list');
+          for (const finding of pkg.vulnerabilities) {
+            findingList.append(node('li', `${finding.id} — 수정 시각(modified): ${finding.modified}`));
+          }
+          findings.append(findingList);
+        }
+        row.append(findings);
+        tbody.append(row);
+      }
+      table.append(tbody);
+      root.append(table);
+
+      if (data.packages.length === 0) {
+        root.append(node('p', data.status === 'complete'
+          ? '조회가 완료됐지만 표시할 패키지가 없습니다.'
+          : '현재 조회 상태에 표시할 패키지 결과가 없습니다.'));
+      }
+      root.append(node('p', 'OSV는 알려진 취약점 데이터베이스입니다. 조회 결과에 항목이 없더라도 패키지나 앱 전체의 안전을 보장하지 않습니다.'));
+      return root;
+    },
     renderAiConnection({ status, mode, data, error, checkedAt, explanationAccepted } = {}) {
       const root = node('section');
       if (MODE_NOTICE[mode]) root.append(node('p', `${MODE_NOTICE[mode]} (${mode})`, 'tag tag-demo'));
